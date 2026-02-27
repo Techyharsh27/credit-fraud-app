@@ -1,171 +1,93 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
-import joblib
-import plotly.graph_objects as go
-import plotly.express as px
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
 
-st.set_page_config(layout="wide")
+st.set_page_config(page_title="AI Fraud Detection", layout="wide")
+
 st.title("🧠 Advanced AI Behaviour-Based Credit Card Fraud Detection (10K Data)")
 
-# --------------------------------------------------
-# LOAD DATA
-# --------------------------------------------------
-@st.cache_data
-def load_data():
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(BASE_DIR, "data", "creditcard.csv")
-    df = pd.read_csv(file_path)
+# =========================
+# MODEL TRAINING FUNCTION
+# =========================
+
+@st.cache_resource
+def train_model():
+    df = pd.read_csv(
+        "https://storage.googleapis.com/download.tensorflow.org/data/creditcard.csv"
+    )
+
+    # Use only 10k rows
     df = df.sample(n=10000, random_state=42)
-    return df
 
-df = load_data()
+    X = df.drop("Class", axis=1)
+    y = df["Class"]
 
-# --------------------------------------------------
-# LOAD MODEL
-# --------------------------------------------------
-MODEL_PATH = "rf_model_10k.pkl"
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
 
-if not os.path.exists(MODEL_PATH):
-    st.error("❌ Model not found. Run train_model.py first.")
-    st.stop()
+    model = RandomForestClassifier(n_estimators=50)
+    model.fit(X_train, y_train)
 
-model = joblib.load(MODEL_PATH)
+    return model
 
-# --------------------------------------------------
-# SIDEBAR CONTROLS
-# --------------------------------------------------
+
+model = train_model()
+
+# =========================
+# SIDEBAR INPUT
+# =========================
+
 st.sidebar.header("⚙ Transaction Controls")
 
-amount_input = st.sidebar.number_input(
-    "💰 Transaction Amount", 0.0, 10000.0, 500.0
-)
+amount = st.sidebar.number_input("💰 Transaction Amount", 0.0, 50000.0, 1000.0)
+time = st.sidebar.number_input("⏱ Transaction Time", 0.0, 200000.0, 50000.0)
 
-time_input = st.sidebar.number_input(
-    "⏱ Transaction Time", 0.0, float(df["Time"].max()), 1000.0
-)
-
-behaviour_type = st.sidebar.selectbox(
+behaviour = st.sidebar.selectbox(
     "🧠 Behaviour Pattern",
-    ["Normal Behaviour", "Suspicious Behaviour", "Highly Anomalous"]
+    ["Normal", "Suspicious", "Highly Anomalous"]
 )
 
 run_button = st.sidebar.button("🚀 Run Analysis")
 
-# --------------------------------------------------
-# PCA GENERATION (REAL DATA BASED)
-# --------------------------------------------------
-def generate_pca(behaviour_type):
-    if behaviour_type == "Normal Behaviour":
-        sample = df[df["Class"] == 0].sample(1)
-    else:
-        sample = df[df["Class"] == 1].sample(1)
+# =========================
+# PREDICTION LOGIC
+# =========================
 
-    return sample.drop("Class", axis=1).iloc[0][1:-1].values
-
-# --------------------------------------------------
-# RUN ANALYSIS
-# --------------------------------------------------
 if run_button:
 
-    pca_values = generate_pca(behaviour_type)
+    # Create dummy input (Time + V1-V28 + Amount)
+    input_data = [time] + [0]*28 + [amount]
+    input_df = pd.DataFrame([input_data], columns=model.feature_names_in_)
 
-    input_data = pd.DataFrame(
-        [[time_input] + list(pca_values) + [amount_input]],
-        columns=df.drop("Class", axis=1).columns
-    )
+    prediction = model.predict(input_df)[0]
+    probability = model.predict_proba(input_df)[0][1]
 
-    prediction = model.predict(input_data)[0]
-    probability = model.predict_proba(input_data)[0][1]
-    risk_score = round(probability * 100, 2)
+    # Risk score calculation
+    risk_score = probability * 100
 
-    col1, col2 = st.columns(2)
+    if behaviour == "Suspicious":
+        risk_score += 15
+    elif behaviour == "Highly Anomalous":
+        risk_score += 30
 
-    with col1:
-        st.metric("🎯 Risk Score", f"{risk_score}/100")
+    risk_score = min(risk_score, 100)
 
-    with col2:
-        if prediction == 1:
-            st.error("🚨 FRAUD DETECTED")
-        else:
-            st.success("✅ Legit Transaction")
+    st.subheader("🎯 Risk Score")
+    st.metric("Fraud Risk Score", f"{risk_score:.1f}/100")
 
-    st.markdown("---")
-
-    # --------------------------------------------------
-    # RISK GAUGE
-    # --------------------------------------------------
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=risk_score,
-        title={'text': "Fraud Risk Meter"},
-        gauge={
-            'axis': {'range': [0, 100]},
-            'bar': {'color': "red"},
-            'steps': [
-                {'range': [0, 40], 'color': "green"},
-                {'range': [40, 70], 'color': "orange"},
-                {'range': [70, 100], 'color': "red"},
-            ],
-        }
-    ))
-
-    st.plotly_chart(fig, use_container_width=True)
-
-    # --------------------------------------------------
-    # EXPLANATION SECTION
-    # --------------------------------------------------
-    st.markdown("### 🔍 Model Explanation")
-
-    explanation = []
-
-    if risk_score > 75:
-        explanation.append("Extremely high anomaly patterns detected in behaviour features.")
-    elif risk_score > 50:
-        explanation.append("Multiple suspicious behavioural indicators found.")
+    if prediction == 1:
+        st.error("⚠ Fraudulent Transaction Detected!")
     else:
-        explanation.append("Behaviour falls within normal transaction range.")
+        st.success("✅ Legitimate Transaction")
 
-    if amount_input > df["Amount"].quantile(0.95):
-        explanation.append("Transaction amount is unusually high compared to historical data.")
+    st.progress(int(risk_score))
 
-    for e in explanation:
-        st.write("•", e)
+# =========================
+# FOOTER
+# =========================
 
-    st.markdown("---")
-
-    # --------------------------------------------------
-    # FEATURE IMPORTANCE
-    # --------------------------------------------------
-    st.subheader("📊 Top 10 Feature Importance (Model Insight)")
-
-    feature_importance = model.feature_importances_
-    feature_names = df.drop("Class", axis=1).columns
-
-    importance_df = pd.DataFrame({
-        "Feature": feature_names,
-        "Importance": feature_importance
-    })
-
-    importance_df = importance_df.sort_values(by="Importance", ascending=False).head(10)
-
-    fig_imp = px.bar(
-        importance_df,
-        x="Importance",
-        y="Feature",
-        orientation="h",
-        title="Top Features Influencing Fraud Detection",
-    )
-
-    st.plotly_chart(fig_imp, use_container_width=True)
-
-    st.markdown("""
-    **Explanation:**  
-    The Random Forest model assigns importance scores to each feature based on how much they contribute 
-    to reducing classification error. Higher importance means the feature plays a stronger role 
-    in detecting fraudulent behaviour.
-    """)
-
-else:
-    st.info("👈 Configure transaction details and click 'Run Analysis'")
+st.markdown("---")
+st.caption("Model trained on 10,000 sampled transactions. Auto-trained at startup.")
